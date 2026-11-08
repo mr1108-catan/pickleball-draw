@@ -848,7 +848,8 @@ function renderAll() {
 }
 const isUntouched = () => !state.schedule.length && sigOf(state) === sigOf(makeDefault()) && !state.players.some(p => p.name.trim());
 function updateHomeBtn() { $("homeBtn").disabled = isUntouched(); }
-function renderSide() {
+// soft のときは入力欄を作り直さず、人数などの文言だけ差し替える(作り直すとスマホでプルダウンが再び開くため)
+function renderSide(soft) {
   const act = activeIds().length, off = state.players.length - act, n = size();
   const used = usableCourts(activeIds(), state.courts, n, cfgOf());
   const focused = document.activeElement && document.activeElement.id;
@@ -859,16 +860,17 @@ function renderSide() {
   const named = state.players.some(p => p.name.trim());
   $("sum").textContent = `設定(${act}人・${state.courts}コート・${state.rounds}回)`;
   const stepper = (key, label, value) => `<div class="field"><span class="label" id="l-${key}">${label}</span><div class="stepper" role="group" aria-labelledby="l-${key}"><button type="button" data-step="${key}" data-d="-1" aria-label="${label}を減らす">−</button>${value}<button type="button" data-step="${key}" data-d="1" aria-label="${label}を増やす">+</button></div></div>`;
-  $("side").innerHTML = `
+  const box = soft ? document.createElement("div") : $("side");
+  box.innerHTML = `
     <div class="main-steps">${stepper("players", "参加人数", `<b>${act}</b>`)}${stepper("courts", "コート", `<b>${state.courts}</b>`)}</div>
-    <p class="plan">${used ? `1回につき <strong>${used * n}人</strong>が試合、<strong>${act - used * n}人</strong>が休み${used < state.courts ? `(この人数で使えるのは${used}面まで)` : ""}` : `${n}人以上で組めます`}</p>
+    <p class="plan" data-live="plan">${used ? `1回につき <strong>${used * n}人</strong>が試合、<strong>${act - used * n}人</strong>が休み${used < state.courts ? `(この人数で使えるのは${used}面まで)` : ""}` : `${n}人以上で組めます`}</p>
     ${!state.schedule.length ? "" : ui.confirm === "from"
       ? `<div class="confirm"><p>第${state.cur + 1}回以降のスコアは消えます。組み直しますか?</p><div><button type="button" class="go" data-act="from-go">組み直す</button><button type="button" class="ghost" data-act="cancel">やめる</button></div></div>`
       : `<button type="button" class="ghost wide" data-act="from">この回(第${state.cur + 1}回)から組み直す</button>
          <p class="plan">途中参加や早退は、人数やメンバーの参加欄を変えてから押してください。第${state.cur + 1}回より前の試合は残ります。</p>`}
     ${ui.confirm === "all" ? `<div class="confirm"><p>入力済みのスコアも消えます。作り直しますか?</p><div><button type="button" class="go" data-act="all-go">作り直す</button><button type="button" class="ghost" data-act="cancel">やめる</button></div></div>`
       : `<button type="button" class="primary" data-act="all">${state.schedule.length ? "全部作り直す" : "組み合わせを作る"}</button>`}
-    ${dirty ? `<p class="plan">設定が変わりました。組み直すと対戦表に反映されます。</p>` : ""}
+    <p class="plan" data-live="dirty"${dirty ? "" : " hidden"}>設定が変わりました。組み直すと対戦表に反映されます。</p>
     <details class="more" data-open="moreOpen"${ui.moreOpen ? " open" : ""}><summary>その他の設定</summary><div>
       <div class="field"><span class="label">形式</span>
         <div class="seg"><button type="button" data-format="d" aria-pressed="${state.format === "d"}">ダブルス</button><button type="button" data-format="s" aria-pressed="${state.format === "s"}">シングルス</button></div></div>
@@ -879,10 +881,10 @@ function renderSide() {
         <div class="seg"><button type="button" data-levelmode="off" aria-pressed="${!state.levelOn}">なし</button><button type="button" data-levelmode="on" aria-pressed="${!!state.levelOn}">あり</button></div></div>
       ${state.levelOn ? `<p class="plan">対戦する2チームの合計レベルが近くなるように組みます。未入力の人はLv.3として扱います。</p>
       <button type="button" class="ghost wide" data-levelone="1" aria-pressed="${!!state.levelOne}">Lv.1のみ固める</button>
-      ${state.levelOne ? `<p class="plan">${levelOneGroup() ? "Lv.1の人同士で試合を組みます。" : `Lv.1の人とそれ以外の人が、それぞれ${n}人以上いると固められます。`}</p>` : ""}` : ""}
+      ${state.levelOne ? `<p class="plan" data-live="one">${levelOneGroup() ? "Lv.1の人同士で試合を組みます。" : `Lv.1の人とそれ以外の人が、それぞれ${n}人以上いると固められます。`}</p>` : ""}` : ""}
       ${state.format === "d" ? `<div class="field"><span class="label">男女ミックス(選ばなければ指定なし)</span>
         <div class="seg four">${mixMode.map(([k, t]) => `<button type="button" data-mix="${k}" aria-pressed="${state.mix === k}">${t}</button>`).join("")}</div></div>
-      ${state.mix === "none" ? "" : `<p class="plan">男 ${countOf("m")}人・女 ${countOf("f")}人${countOf("") ? `・性別未入力 ${countOf("")}人(男女どちらの枠にも入ります)` : ""}</p>`}` : ""}
+      ${state.mix === "none" ? "" : `<p class="plan" data-live="mix">男 ${countOf("m")}人・女 ${countOf("f")}人${countOf("") ? `・性別未入力 ${countOf("")}人(男女どちらの枠にも入ります)` : ""}</p>`}` : ""}
     </div></details>
     <details class="more" data-open="namesOpen"${ui.namesOpen ? " open" : ""}><summary>メンバーの名前(任意)</summary><div>
       <p class="plan">名前は6文字までです。入れなければ番号で表示します。レベルは「レベル別の調整」をありにすると使います。${off ? `不参加 ${off}人。` : ""}</p>
@@ -898,6 +900,14 @@ function renderSide() {
       <div class="add"><textarea id="newname" placeholder="まとめて入力(改行や、で区切る)" aria-label="まとめて入力する名前"></textarea><button type="button" data-act="add">入れる</button></div>
       ${named ? (ui.confirm === "names" ? `<div class="confirm"><p>名前をすべて消して番号に戻しますか?</p><div><button type="button" class="go" data-act="names-go">消す</button><button type="button" class="ghost" data-act="cancel">やめる</button></div></div>` : `<button type="button" class="linkbtn" data-act="names">名前をすべて消す</button>`) : ""}
     </div></details>`;
+  if (soft) {
+    box.querySelectorAll("[data-live]").forEach(n => {
+      const old = $("side").querySelector(`[data-live="${n.dataset.live}"]`);
+      if (old) old.replaceWith(n);
+    });
+    updateHomeBtn();
+    return;
+  }
   $("resetbox").innerHTML = ui.confirm === "reset" ? `<div class="confirm"><p>対戦表、スコア、名前、設定をすべて消して、最初の画面に戻りますか?</p><div><button type="button" class="go" data-act="reset-go">消して戻る</button><button type="button" class="ghost" data-act="cancel">やめる</button></div></div>` : "";
   updateHomeBtn();
   // 一覧を描き直しても、入力中の位置を保つ
@@ -1109,7 +1119,7 @@ document.addEventListener("change", e => {
     const p = state.players.find(x => x.id === (t.dataset.gender || t.dataset.level));
     if (p) {
       if (t.dataset.gender) p.gender = t.value; else p.level = +t.value;
-      touch(); renderSide();
+      touch(); renderSide(true);
     }
   }
   if (t.dataset.on) {
