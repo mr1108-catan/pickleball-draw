@@ -59,7 +59,7 @@ body.own #shareBtn { display: none; }
 .sharepanel ol { padding-left: 1.4em; }
 .sharepanel .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .sharepanel .primary { width: auto; padding: 9px 14px; font-size: 15px; }
-body.viewer #setup, body.viewer #homeBtn, body.viewer #shareBtn, body.viewer [data-act="addround"] { display: none; }
+body.viewer #setup, body.viewer #homeBtn, body.viewer #shareBtn, body.viewer [data-act="addround"], body.viewer [data-act="link"] { display: none; }
 body.viewer .layout, body.viewer.start .layout { grid-template-columns: minmax(0, 1fr); justify-content: stretch; }
 body.viewer main, body.viewer.start main { display: grid; }
 .kit input:disabled { opacity: 1; -webkit-text-fill-color: var(--ink); }
@@ -521,6 +521,8 @@ const MAX_ROUNDS = 100;
 const LEVEL_NOTES = ["今回が初めて", "10回未満程度", "セルフジャッジができる", "ゲームのセオリーがわかる", "コーチ級"];
 // 閲覧モードは、編集権限がない人か、主催者が閲覧画面を確認しているときに使う
 let readOnly = false, remoteCur = null, ownMode = false, stopSync = [];
+// サイト版の共有リンク。乱数表をリンクの # 以降に詰めて渡す
+let inClaude = false, linkMode = false, linkTime = 0;
 const viewing = () => readOnly || !!ui.preview;
 // スコアは対戦表とは別に1試合1件で保存し、共有した人も書き込めるようにする
 let scoresRef = null, scoreLocked = false, scoresDirty = false, scoreTimer = null, scoreBusy = false, lastDoc = null;
@@ -669,6 +671,8 @@ async function connect() {
   const inViewer = !!(window.claude && window.claude.use);
   // Claudeの外で開いたサイト版には共有の仕組みがない
   $("shareBtn").hidden = !inViewer;
+  inClaude = inViewer;
+  if (!inViewer && location.hash.startsWith("#s=")) { await openSharedLink(); return; }
   const db = inViewer ? await claude.use("db") : null;
   if (!db) {
     if (inViewer) renderSignedOut(); else fallback("この端末に保存します");
@@ -702,6 +706,94 @@ async function connect() {
     if (!viewing()) setStatus("同期済み");
   }, () => { clearTimeout(loadTimer); if (!state) dbRef = null; fallback("保存先に接続できません。この端末に保存します"); }));
 }
+const toB64 = bytes => { let s = ""; bytes.forEach(b => { s += String.fromCharCode(b); }); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
+const fromB64 = text => Uint8Array.from(atob(text.replace(/-/g, "+").replace(/_/g, "/")), ch => ch.charCodeAt(0));
+async function streamBytes(bytes, transform) {
+  return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(transform)).arrayBuffer());
+}
+// 先頭の z は圧縮あり、j は圧縮なし(圧縮に対応しない古いブラウザ用)
+async function encodeLink(obj) {
+  const bytes = new TextEncoder().encode(JSON.stringify(obj));
+  if (window.CompressionStream) return "z" + toB64(await streamBytes(bytes, new CompressionStream("deflate-raw")));
+  return "j" + toB64(bytes);
+}
+async function decodeLink(code) {
+  let bytes = fromB64(code.slice(1));
+  if (code[0] === "z") bytes = await streamBytes(bytes, new DecompressionStream("deflate-raw"));
+  else if (code[0] !== "j") throw new Error("format");
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+function packState() {
+  const used = new Set(state.schedule.flatMap(r => r.rest.concat(r.matches.flatMap(m => m.a.concat(m.b)))));
+  return {
+    v: 1, t: Date.now(), f: state.format, c: state.cur,
+    p: state.players.filter(p => used.has(p.id)).map(p => [noOf(p.id), p.name || "", p.gender || "", p.level || 0]),
+    s: state.schedule.map(r => [r.matches.map(m => [m.a.map(noOf), m.b.map(noOf), m.sa, m.sb]), r.rest.map(noOf)]),
+  };
+}
+// リンクの中身は誰でも書き換えられるので、形と範囲を確かめてから使う
+function unpackState(d) {
+  const num = (x, lo, hi) => Number.isInteger(x) && x >= lo && x <= hi;
+  const score = x => x === null || num(x, 0, 99);
+  if (!d || d.v !== 1 || !Array.isArray(d.p) || !Array.isArray(d.s) || d.p.length > 60 || d.s.length > MAX_ROUNDS || !d.s.length) throw new Error("shape");
+  const st = makeDefault();
+  st.players = d.p.map(x => {
+    if (!Array.isArray(x) || !num(x[0], 1, 999)) throw new Error("player");
+    return { id: "p" + x[0], name: clip(String(x[1] || "")), gender: ["m", "f"].includes(x[2]) ? x[2] : "", level: num(x[3], 0, 5) ? x[3] : 0, active: true };
+  });
+  const known = new Set(st.players.map(p => p.id));
+  const ids = list => {
+    if (!Array.isArray(list)) throw new Error("ids");
+    return list.map(n => { const id = "p" + n; if (!known.has(id)) throw new Error("id"); return id; });
+  };
+  st.schedule = d.s.map(r => {
+    if (!Array.isArray(r) || !Array.isArray(r[0]) || r[0].length > 12) throw new Error("round");
+    return {
+      matches: r[0].map(m => {
+        if (!Array.isArray(m) || !score(m[2]) || !score(m[3])) throw new Error("match");
+        return { a: ids(m[0]), b: ids(m[1]), sa: m[2], sb: m[3] };
+      }),
+      rest: ids(r[1]),
+    };
+  });
+  st.format = d.f === "s" ? "s" : "d";
+  st.courts = Math.max(1, ...st.schedule.map(r => r.matches.length));
+  st.rounds = st.schedule.length;
+  st.players.sort((x, y) => noOf(x.id) - noOf(y.id));
+  st.cur = num(d.c, 0, st.schedule.length - 1) ? d.c : 0;
+  st.sig = sigOf(st);
+  linkTime = num(d.t, 0, 9e15) ? d.t : 0;
+  return st;
+}
+async function openSharedLink() {
+  try {
+    state = unpackState(await decodeLink(location.hash.slice(3)));
+    linkMode = true; readOnly = true; scoreLocked = true;
+    renderAll();
+  } catch {
+    fallback("この端末に保存します");
+    flash("共有リンクを読み込めませんでした。リンクが途中で切れていないか確認してください。");
+  }
+}
+async function shareLink() {
+  const url = location.origin + location.pathname + "#s=" + await encodeLink(packState());
+  if (navigator.share) {
+    try { await navigator.share({ title: "ピックル乱数表", text: "対戦表です", url }); return; }
+    catch (e) { if (e && e.name === "AbortError") return; }
+  }
+  const show = () => {
+    $("copyslot").innerHTML = '<textarea id="copybox" aria-label="共有リンク" readonly></textarea>';
+    $("copybox").value = url; $("copybox").select();
+    flash("自動でコピーできませんでした。選択中のリンクをコピーしてください。");
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(() => { flash(""); setStatus("共有リンクをコピーしました"); }, show);
+  else show();
+}
+const linkLabel = () => {
+  if (!linkTime) return "共有された乱数表";
+  const d = new Date(linkTime);
+  return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}時点の共有乱数表`;
+};
 // 共有された人が、自分の対戦表をこの端末に作って使う
 function useOwnCopy() {
   stopSync.forEach(stop => stop());
@@ -822,13 +914,23 @@ function renderLoading() {
   $("panel").innerHTML = '<div class="empty"><h2>対戦表を読み込んでいます</h2><p>保存した組み合わせとスコアがここに出ます。</p></div>';
   renderTabs();
 }
-const statusText = () => scoreLocked || ui.preview ? "閲覧モード・自動で更新されます" : "共有モード・スコアを入力できます";
+const statusText = () => linkMode ? linkLabel() : scoreLocked || ui.preview ?"閲覧モード・自動で更新されます" : "共有モード・スコアを入力できます";
 function renderSignedOut() {
   document.body.classList.add("viewer");
   $("tabs").innerHTML = "";
   $("panel").innerHTML = `<div class="empty"><h2>対戦表を表示できません</h2><p>共有された対戦表を見るには、Claudeにサインインしてから開き直してください。</p><div class="tools" style="margin-top: 12px"><button type="button" class="ghost" data-act="local">この端末だけで使う</button></div></div>`;
 }
 function renderShare() {
+  if (linkMode) {
+    const own = lsGet("pb-state");
+    const hasOwn = own && Array.isArray(own.schedule) && own.schedule.length;
+    $("sharebox").innerHTML = `<div class="sharepanel">
+      <p>共有リンクで送られた乱数表です。送った人があとで更新しても、この画面には反映されません。新しい内容は、もう一度リンクを送ってもらってください。</p>
+      ${ui.confirm === "linksave" ? `<div class="confirm"><p>この端末にある自分の対戦表は上書きされます。保存しますか?</p><div><button type="button" class="go" data-act="link-save-go">上書きして保存</button><button type="button" class="ghost" data-act="cancel">やめる</button></div></div>`
+        : `<div class="actions"><button type="button" class="primary" data-act="${hasOwn ? "link-save" : "link-save-go"}">この乱数表を自分の端末に保存</button><button type="button" class="ghost" data-act="link-close">自分の対戦表に戻る</button></div>`}
+    </div>`;
+    return;
+  }
   if (readOnly) { $("sharebox").innerHTML = ""; return; }
   if (ui.preview) {
     $("sharebox").innerHTML = `<div class="sharepanel"><p>共有した人に見える画面を確認しています。</p><div class="actions"><button type="button" class="primary" data-act="share-exit">編集に戻る</button></div></div>`;
@@ -847,7 +949,7 @@ function renderAll() {
   document.body.classList.toggle("start", start);
   document.body.classList.toggle("viewer", viewing());
   document.body.classList.toggle("own", ownMode);
-  $("ownBtn").hidden = !readOnly;
+  $("ownBtn").hidden = !readOnly || linkMode;
   $("backBtn").hidden = !ownMode;
   if (viewing()) setStatus(statusText());
   renderShare();
@@ -978,6 +1080,7 @@ function renderDraw() {
     </div>
     <div class="tools">
       <select id="who" aria-label="探す人を選ぶ"><option value="">自分の試合を探す</option>${state.players.map(p => `<option value="${esc(p.id)}"${ui.who === p.id ? " selected" : ""}>${esc(nameOf(p.id))}</option>`).join("")}</select>
+      ${inClaude ? "" : '<button type="button" class="ghost" data-act="link">共有リンクを作る</button>'}
       <button type="button" class="ghost" data-act="copy">テキストをコピー</button>
       <button type="button" class="ghost" data-act="addround">試合を追加</button>
     </div>
@@ -1068,6 +1171,15 @@ document.addEventListener("click", e => {
   if (act === "add") { addPlayers($("newname").value); $("newname").focus(); }
   if (act === "all") { if (hasScores()) { ui.confirm = "all"; renderSide(); } else generateAll(); }
   if (act === "all-go") generateAll();
+  if (act === "link") shareLink();
+  if (act === "link-save") { ui.confirm = "linksave"; renderShare(); }
+  if (act === "link-save-go") {
+    const own = JSON.parse(JSON.stringify(state));
+    own.rev = Math.random().toString(36).slice(2);
+    lsSet("pb-state", own);
+    location.replace(location.pathname);
+  }
+  if (act === "link-close") location.replace(location.pathname);
   if (act === "own") useOwnCopy();
   if (act === "back") location.reload();
   if (act === "fold") { ui.showDone = !ui.showDone; renderPanel(); }
@@ -1082,7 +1194,7 @@ document.addEventListener("click", e => {
   }
   if (act === "names") { ui.confirm = "names"; renderSide(); }
   if (act === "names-go") { state.players.forEach(p => { p.name = ""; }); ui.confirm = null; touch(); renderSide(); renderPanel(); }
-  if (act === "cancel") { ui.confirm = null; renderSide(); renderPanel(); }
+  if (act === "cancel") { ui.confirm = null; renderSide(); renderPanel(); renderShare(); }
   if (act === "addround") addRound();
   if (act === "from") {
     if (state.schedule.slice(state.cur).some(x => x.matches.some(m => m.sa != null || m.sb != null))) { ui.confirm = "from"; renderSide(); }
@@ -1145,6 +1257,8 @@ document.addEventListener("keydown", e => {
   }
 });
 
+// 開いたまま別の共有リンクを開いたときは読み直す
+window.addEventListener("hashchange", () => { if (!inClaude && location.hash.startsWith("#s=")) location.reload(); });
 document.addEventListener("toggle", e => {
   if (e.target.dataset && e.target.dataset.open) ui[e.target.dataset.open] = e.target.open;
 }, true);
