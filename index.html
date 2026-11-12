@@ -332,6 +332,12 @@ function mixCost(cfg, g) {
     const f = g.filter(id => cfg.gender.get(id) === "f").length;
     return !m || !f ? 0 : m + f === 4 && m !== f ? 9000 : 5000;
   }
+  if (cfg.mode === "pref" && g.every(id => cfg.gender.get(id))) {
+    // ミックス優先: 男女ペア同士が最善、次に同性4人。男ペア対女ペアと 3:1 は避ける
+    const f = g.filter(id => cfg.gender.get(id) === "f").length;
+    if (f === 0 || f === 4) return 5000;
+    return f === 2 && isMixedTeam(cfg, g[0], g[1]) ? 0 : 20000;
+  }
   const weight = cfg.mode === "only" ? 100000 : 5000;
   return weight * ((isMixedTeam(cfg, g[0], g[1]) ? 0 : 1) + (isMixedTeam(cfg, g[2], g[3]) ? 0 : 1));
 }
@@ -377,10 +383,10 @@ function pickRest(s, ids, used, size, rng) {
   evenOutGenders(s, ids, play);
   return ids.filter(id => !play.includes(id));
 }
-// 女子優先・男子優先で女子が奇数人だと 3:1 の試合ができるので、1人入れ替えて偶数にする
+// 女子が奇数人で試合に入ると 3:1 の試合ができるので、1人入れ替えて偶数にする
 function evenOutGenders(s, ids, play) {
   const cfg = s.cfg;
-  if (cfg.mode !== "women" && cfg.mode !== "men") return;
+  if (!["women", "men", "pref"].includes(cfg.mode)) return;
   const gender = id => cfg.gender.get(id);
   const inPlay = g => play.filter(id => gender(id) === g);
   const resting = g => ids.filter(id => gender(id) === g && !play.includes(id));
@@ -442,6 +448,13 @@ function tryRound(s, ids, courts, size, rng) {
     if (s.cfg && (s.cfg.mode === "women" || s.cfg.mode === "men") && size === 4) {
       const first = s.cfg.mode === "women" ? "f" : "m";
       on.sort((x, y) => (s.cfg.gender.get(x) === first ? 0 : 1) - (s.cfg.gender.get(y) === first ? 0 : 1));
+    }
+    // ミックス優先は「男女・男女」の組を先に作り、余りを同性4人にした並びから探し始める
+    if (s.cfg && s.cfg.mode === "pref" && size === 4 && on.every(id => s.cfg.gender.get(id))) {
+      const men = on.filter(id => s.cfg.gender.get(id) === "m"), women = on.filter(id => s.cfg.gender.get(id) === "f");
+      const seeded = [];
+      while (men.length >= 2 && women.length >= 2) seeded.push(men.pop(), women.pop(), men.pop(), women.pop());
+      on.splice(0, on.length, ...seeded, ...men, ...women);
     }
     rest.push(...off); arr.push(...on);
   }
