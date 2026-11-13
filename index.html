@@ -288,7 +288,8 @@ function commitRound(s, rd, r) {
   s.round = r + 1;
 }
 function matchCost(s, g) {
-  const recent = k => s.lastPair.get(k) === s.round - 1 ? 1 : 0;
+  // 直前の回に一緒だった組は1、その前の回なら0.5(1回おきに同じ顔ぶれが戻るのを防ぐ)
+  const recent = k => { const r = s.lastPair.get(k); return r === s.round - 1 ? 1 : r === s.round - 2 ? 0.5 : 0; };
   let c = 0;
   if (g.length === 4) {
     for (const k of [pairKey(g[0], g[1]), pairKey(g[2], g[3])]) {
@@ -297,7 +298,8 @@ function matchCost(s, g) {
     }
     for (const x of [g[0], g[1]]) for (const y of [g[2], g[3]]) {
       const k = pairKey(x, y), o = s.opp.get(k) || 0;
-      c += 6 * o * o + 4 * recent(k);
+      // 同じ相手との対戦は回数とともに重く、直前の回と同じ相手はさらに避ける
+      c += 15 * o * o + 30 * recent(k);
     }
   } else {
     const k = pairKey(g[0], g[1]), o = s.opp.get(k) || 0;
@@ -354,15 +356,15 @@ function shuffle(a, rng) {
   for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
   return a;
 }
-function chooseRest(s, ids, rng) {
-  // 試合数が多い人から休む。同数なら直前に休んでいない人を優先
-  return shuffle(ids.slice(), rng).sort((x, y) =>
-    (s.played.get(y) || 0) - (s.played.get(x) || 0) ||
-    (s.lastRest.get(x) === s.round - 1 ? 1 : 0) - (s.lastRest.get(y) === s.round - 1 ? 1 : 0)
-  );
+function chooseRest(s, ids, rng, strict) {
+  // 試合数が多い人から休む。strict のときは同数なら直前に休んでいない人を優先する。
+  // strict だけだと8人1面のような人数で同じ4人組が交互に出続けるため、
+  // くじ引きだけの案も作って buildRound で比べる(連続休みは評価で減点)
+  const rested = id => strict && s.lastRest.get(id) === s.round - 1 ? 1 : 0;
+  return shuffle(ids.slice(), rng).sort((x, y) => (s.played.get(y) || 0) - (s.played.get(x) || 0) || rested(x) - rested(y));
 }
-function pickRest(s, ids, used, size, rng) {
-  const order = chooseRest(s, ids, rng);
+function pickRest(s, ids, used, size, rng, avoidRepeat) {
+  const order = chooseRest(s, ids, rng, avoidRepeat);
   const n = ids.length - used * size;
   if (!s.cfg || s.cfg.mode === "none" || size !== 4) return order.slice(0, n);
   // 男女の人数枠を決め、試合数の少ない人から入れる
@@ -420,9 +422,12 @@ function buildRound(s, ids, courts, size, rng) {
   const soft = s.cfg && s.cfg.mode !== "none" && s.cfg.mode !== "only";
   let best = null;
   // 優先設定は休む人の組み合わせで結果が変わるので、数通り比べる
-  for (let k = 0; k < (soft ? 4 : 1); k++) {
-    const res = tryRound(s, ids, courts, size, rng);
-    if (!best || res.cost < best.cost) best = res;
+  // 休みが出る人数では、休む人の選び方で顔ぶれが変わるので数通り比べる(少人数ほど多く)
+  const resting = ids.length > courts * size ? Math.min(6, Math.max(1, Math.round(48 / ids.length))) : 1;
+  for (let k = 0; k < Math.max(soft ? 4 : 1, resting); k++) {
+    const res = tryRound(s, ids, courts, size, rng, k === 0);
+    // 同点なら、くじ引きの案(顔ぶれが変わりやすい)を選ぶ
+    if (!best || res.cost <= best.cost) best = res;
   }
   return best;
 }
@@ -438,11 +443,11 @@ function splitByLevelOne(s, ids, used, size) {
   const k = Math.max(used - Math.floor(high.length / size), Math.min(Math.floor(low.length / size), wanted));
   return [{ ids: low, used: k }, { ids: high, used: used - k }];
 }
-function tryRound(s, ids, courts, size, rng) {
+function tryRound(s, ids, courts, size, rng, strict) {
   const rest = [], arr = [];
   for (const part of splitByLevelOne(s, ids, usableCourts(ids, courts, size, s.cfg), size)) {
     const count = usableCourts(part.ids, part.used, size, s.cfg);
-    const off = pickRest(s, part.ids, count, size, rng);
+    const off = pickRest(s, part.ids, count, size, rng, strict);
     const on = shuffle(part.ids.filter(id => !off.includes(id)), rng);
     // 女子優先・男子優先は同性でまとまった並びから探し始める
     if (s.cfg && (s.cfg.mode === "women" || s.cfg.mode === "men") && size === 4) {
@@ -478,7 +483,8 @@ function tryRound(s, ids, courts, size, rng) {
     total += matchCost(s, p);
     matches.push({ a: p.slice(0, size / 2), b: p.slice(size / 2), sa: null, sb: null });
   }
-  return { round: { matches, rest }, cost: total };
+  const restAgain = rest.filter(id => s.lastRest.get(id) === s.round - 1).length;
+  return { round: { matches, rest }, cost: total + 5 * restAgain };
 }
 // 何通りも試して、ペアと対戦相手の重複が最も少ない表を返す
 function makeRounds(history, ids, courts, size, count, budgetMs, cfg, rng) {
